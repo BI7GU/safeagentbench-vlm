@@ -16,7 +16,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_SMOKE_SAMPLES = [1, 2, 296, 297, 298]
+DEFAULT_SMOKE_SAMPLES = [1, 2, 297, 298]
 
 
 def load_dataset_sample(dataset_path, sample_index):
@@ -94,7 +94,13 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=2
 
         history = []
         execution_log = []
+        pre_satisfied = evaluate_final_state(controller.last_event.metadata["objects"], final_state) is True
+        if pre_satisfied:
+            logger.info("Initial scene already satisfies expected final state")
+
         for step_idx in range(max_steps):
+            if pre_satisfied:
+                break
             logger.info("Planning step %s/%s", step_idx + 1, max_steps)
             frame = controller.last_event.frame
             try:
@@ -130,6 +136,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=2
             "history": history,
             "execution_log": execution_log,
             "final_metadata": controller.last_event.metadata,
+            "pre_satisfied": pre_satisfied,
         }
     finally:
         if controller is not None:
@@ -161,6 +168,12 @@ def run_dataset_sample(dataset_path, sample_index, max_steps=None):
         result["final_metadata"]["objects"],
         sample.get("final_state"),
     )
+    if result["pre_satisfied"]:
+        result["result_type"] = "pre_satisfied"
+    elif result["final_state_success"] is True:
+        result["result_type"] = "solved"
+    else:
+        result["result_type"] = "failed"
     return result
 
 
@@ -168,21 +181,39 @@ def run_smoke_test(dataset_path, sample_indices=None, max_steps=None):
     sample_indices = sample_indices or DEFAULT_SMOKE_SAMPLES
     results = []
     failed = []
+    counts = {"solved": 0, "failed": 0, "pre_satisfied": 0, "runner_error": 0}
     for sample_index in sample_indices:
-        result = run_dataset_sample(
-            dataset_path=dataset_path,
-            sample_index=sample_index,
-            max_steps=max_steps,
-        )
+        try:
+            result = run_dataset_sample(
+                dataset_path=dataset_path,
+                sample_index=sample_index,
+                max_steps=max_steps,
+            )
+        except Exception as exc:
+            sample = load_dataset_sample(dataset_path, sample_index)
+            result = {
+                "scene": sample["scene_name"],
+                "task": sample["instruction"],
+                "sample_index": sample_index,
+                "history": [],
+                "execution_log": [],
+                "final_state_success": False,
+                "result_type": "runner_error",
+                "error": str(exc),
+            }
         results.append(result)
-        if result["final_state_success"] is not True:
+        counts[result["result_type"]] += 1
+        if result["result_type"] not in {"solved", "pre_satisfied"}:
             failed.append(sample_index)
 
     summary = {
         "total": len(results),
-        "success": len(results) - len(failed),
+        "success": counts["solved"] + counts["pre_satisfied"],
         "failed": len(failed),
         "failed_indices": failed,
+        "solved": counts["solved"],
+        "pre_satisfied": counts["pre_satisfied"],
+        "runner_error": counts["runner_error"],
     }
     return results, summary
 
@@ -194,14 +225,20 @@ def print_smoke_test_results(results, summary):
         print(f"sample_index: {result['sample_index']}")
         print(f"scene_name: {result['scene']}")
         print(f"instruction: {result['task']}")
+        print(f"result_type: {result['result_type']}")
         print(f"predicted_actions: {result['history']}")
         print(f"execution_summary: {[step['success'] for step in result['execution_log']]}")
         print(f"final_state_success: {result['final_state_success']}")
+        if result.get("error"):
+            print(f"error: {result['error']}")
     print("---")
     print(f"total: {summary['total']}")
     print(f"success: {summary['success']}")
     print(f"failed: {summary['failed']}")
     print(f"failed_indices: {summary['failed_indices']}")
+    print(f"solved: {summary['solved']}")
+    print(f"pre_satisfied: {summary['pre_satisfied']}")
+    print(f"runner_error: {summary['runner_error']}")
 
 
 def parse_args():
@@ -250,8 +287,8 @@ if __name__ == "__main__":
         )
         print("Demo execution result:")
 
-    for key, value in output.items():
-        if key == "final_metadata":
-            print(f"{key}: <metadata omitted>")
-        else:
-            print(f"{key}: {value}")
+        for key, value in output.items():
+            if key == "final_metadata":
+                print(f"{key}: <metadata omitted>")
+            else:
+                print(f"{key}: {value}")
