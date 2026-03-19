@@ -9,7 +9,6 @@ import requests
 from PIL import Image
 
 
-DEFAULT_API_SECRET_KEY = "fk3468961406.qtERazp-DXIOr5WH_3CAlRPHRmfdtxdua82997f7"
 DEFAULT_BASE_URL = "https://api.360.cn/v1/chat/completions"
 DEFAULT_MODEL = "alibaba/qwen3-vl-plus"
 
@@ -18,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 class RemoteVLMError(Exception):
     pass
+
+
+def get_required_env(name):
+    value = os.getenv(name)
+    if value:
+        return value
+    raise RemoteVLMError(
+        f"Missing required environment variable: {name}. "
+        f"Please export {name} before calling the remote VLM."
+    )
 
 
 def encode_image_to_base64(image_path):
@@ -43,7 +52,7 @@ class RemoteVLMClient:
         timeout=60,
         user="andy",
     ):
-        self.api_key = api_key or os.getenv("VLM_API_SECRET_KEY") or DEFAULT_API_SECRET_KEY
+        self.api_key = api_key or get_required_env("VLM_API_SECRET_KEY")
         self.base_url = base_url or os.getenv("VLM_BASE_URL") or DEFAULT_BASE_URL
         self.model = model or os.getenv("VLM_MODEL") or DEFAULT_MODEL
         self.timeout = timeout
