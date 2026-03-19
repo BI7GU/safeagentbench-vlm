@@ -16,6 +16,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_SMOKE_SAMPLES = [1, 2, 296, 297, 298]
+
 
 def load_dataset_sample(dataset_path, sample_index):
     dataset_path = Path(dataset_path)
@@ -162,6 +164,46 @@ def run_dataset_sample(dataset_path, sample_index, max_steps=None):
     return result
 
 
+def run_smoke_test(dataset_path, sample_indices=None, max_steps=None):
+    sample_indices = sample_indices or DEFAULT_SMOKE_SAMPLES
+    results = []
+    failed = []
+    for sample_index in sample_indices:
+        result = run_dataset_sample(
+            dataset_path=dataset_path,
+            sample_index=sample_index,
+            max_steps=max_steps,
+        )
+        results.append(result)
+        if result["final_state_success"] is not True:
+            failed.append(sample_index)
+
+    summary = {
+        "total": len(results),
+        "success": len(results) - len(failed),
+        "failed": len(failed),
+        "failed_indices": failed,
+    }
+    return results, summary
+
+
+def print_smoke_test_results(results, summary):
+    print("Smoke test results:")
+    for result in results:
+        print("---")
+        print(f"sample_index: {result['sample_index']}")
+        print(f"scene_name: {result['scene']}")
+        print(f"instruction: {result['task']}")
+        print(f"predicted_actions: {result['history']}")
+        print(f"execution_summary: {[step['success'] for step in result['execution_log']]}")
+        print(f"final_state_success: {result['final_state_success']}")
+    print("---")
+    print(f"total: {summary['total']}")
+    print(f"success: {summary['success']}")
+    print(f"failed: {summary['failed']}")
+    print(f"failed_indices: {summary['failed_indices']}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Minimal VLM-driven SafeAgentBench demo runner")
     parser.add_argument("--scene", default="FloorPlan407")
@@ -169,12 +211,31 @@ def parse_args():
     parser.add_argument("--max-steps", type=int, default=2)
     parser.add_argument("--dataset", default=None, help="Path to a dataset jsonl file")
     parser.add_argument("--sample-index", type=int, default=1, help="1-based sample index in the dataset")
+    parser.add_argument("--smoke-test", action="store_true", help="Run a small batch of curated dataset samples")
+    parser.add_argument(
+        "--sample-indices",
+        default=None,
+        help="Comma-separated sample indices for smoke test; defaults to curated samples",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.dataset:
+    if args.smoke_test:
+        dataset_path = args.dataset or "dataset/safe_detailed_1009.jsonl"
+        sample_indices = (
+            [int(x.strip()) for x in args.sample_indices.split(",") if x.strip()]
+            if args.sample_indices
+            else DEFAULT_SMOKE_SAMPLES
+        )
+        results, summary = run_smoke_test(
+            dataset_path=dataset_path,
+            sample_indices=sample_indices,
+            max_steps=args.max_steps,
+        )
+        print_smoke_test_results(results, summary)
+    elif args.dataset:
         output = run_dataset_sample(
             dataset_path=args.dataset,
             sample_index=args.sample_index,
