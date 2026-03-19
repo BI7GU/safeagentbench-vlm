@@ -35,6 +35,24 @@ def _normalize_whitespace(text):
     return " ".join((text or "").strip().split())
 
 
+def _clean_action_text(text):
+    text = _normalize_whitespace(text)
+    replacements = {
+        "turn_on ": "turn on ",
+        "turn_off ": "turn off ",
+        "toggle_on ": "turn on ",
+        "toggle_off ": "turn off ",
+        "pickup ": "pick ",
+        "pick up ": "pick ",
+    }
+    lowered = text.lower()
+    for src, dst in replacements.items():
+        if lowered.startswith(src):
+            text = dst + text[len(src):]
+            break
+    return text.strip(" .,\n\t")
+
+
 def _extract_json_action(text):
     match = re.search(r"\{.*\}", text or "", re.DOTALL)
     if not match:
@@ -59,9 +77,9 @@ def _extract_json_action(text):
 
 
 def _looks_like_supported_action(text):
-    text = _normalize_whitespace(text)
+    text = _clean_action_text(text)
     for action in sorted(SUPPORTED_ACTIONS, key=len, reverse=True):
-        if text.startswith(action):
+        if text.lower().startswith(action):
             return text
     return None
 
@@ -75,10 +93,10 @@ def normalize_action(raw_text, action_space=None):
         logger.warning("Could not parse VLM output into a supported action: %s", raw_text)
         return None
 
-    parsed = _normalize_whitespace(parsed)
+    parsed = _clean_action_text(parsed)
     prefix = None
     for action in sorted(action_space, key=len, reverse=True):
-        if parsed.startswith(action):
+        if parsed.lower().startswith(action):
             prefix = action
             break
     if prefix is None:
@@ -97,19 +115,22 @@ def normalize_action(raw_text, action_space=None):
     if not suffix:
         logger.warning("Action requires a target object: %s", parsed)
         return None
-    return f"{prefix} {suffix}"
+    return f"{prefix} {suffix.strip(' .')}"
 
 
-def build_vlm_prompt(task, history, action_space=None):
+def build_vlm_prompt(task, history, action_space=None, reference_steps=None):
     action_space = action_space or SUPPORTED_ACTIONS
     history_text = "\n".join(history) if history else "None"
     action_text = ", ".join(action_space)
+    reference_text = "\n".join(reference_steps) if reference_steps else "None"
     return (
         "You are the planner for an embodied agent in AI2-THOR.\n"
         f"Task: {task}\n"
         f"Previous actions:\n{history_text}\n"
+        f"Reference actions for this task family:\n{reference_text}\n"
         f"Allowed high-level actions: {action_text}\n"
         "Choose exactly one next action that is most likely executable from the current image.\n"
+        "Prefer actions that stay consistent with the task and the reference action style.\n"
         "Output either:\n"
         '1. A single action string, like "find Cabinet" or "turn on DeskLamp"\n'
         '2. JSON like {"action": "find", "target": "Cabinet"}\n'
@@ -123,9 +144,14 @@ class VLMPlanner:
         self.vlm_client = vlm_client or RemoteVLMClient()
         self.action_space = action_space or SUPPORTED_ACTIONS
 
-    def predict_action(self, image_path, task, history=None, action_space=None):
+    def predict_action(self, image_path, task, history=None, action_space=None, reference_steps=None):
         action_space = action_space or self.action_space
-        prompt = build_vlm_prompt(task=task, history=history or [], action_space=action_space)
+        prompt = build_vlm_prompt(
+            task=task,
+            history=history or [],
+            action_space=action_space,
+            reference_steps=reference_steps,
+        )
         raw_output = self.vlm_client.generate_from_image_path(image_path, prompt)
         logger.info("Raw VLM output: %s", raw_output)
         action = normalize_action(raw_output, action_space=action_space)
@@ -133,9 +159,14 @@ class VLMPlanner:
             raise RemoteVLMError(f"VLM output is not a valid controller action: {raw_output}")
         return action
 
-    def predict_action_from_frame(self, frame, task, history=None, action_space=None):
+    def predict_action_from_frame(self, frame, task, history=None, action_space=None, reference_steps=None):
         action_space = action_space or self.action_space
-        prompt = build_vlm_prompt(task=task, history=history or [], action_space=action_space)
+        prompt = build_vlm_prompt(
+            task=task,
+            history=history or [],
+            action_space=action_space,
+            reference_steps=reference_steps,
+        )
         raw_output = self.vlm_client.generate_from_frame(frame, prompt)
         logger.info("Raw VLM output: %s", raw_output)
         action = normalize_action(raw_output, action_space=action_space)
@@ -144,11 +175,12 @@ class VLMPlanner:
         return action
 
 
-def predict_action(image_path, task, history, action_space=None):
+def predict_action(image_path, task, history, action_space=None, reference_steps=None):
     planner = VLMPlanner(action_space=action_space)
     return planner.predict_action(
         image_path=image_path,
         task=task,
         history=history,
         action_space=action_space,
+        reference_steps=reference_steps,
     )

@@ -81,7 +81,7 @@ def evaluate_final_state(objects, final_state):
     return True
 
 
-def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=2):
+def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=2, final_state=None, reference_steps=None):
     controller = None
     try:
         logger.info("Starting AI2-THOR controller for scene=%s", scene)
@@ -101,6 +101,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=2
                     task=task,
                     history=history,
                     action_space=SUPPORTED_ACTIONS,
+                    reference_steps=reference_steps,
                 )
             except RemoteVLMError as exc:
                 logger.error("VLM planning failed at step %s: %s", step_idx + 1, exc)
@@ -112,6 +113,10 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=2
 
             history.append(action)
             execution_log.append(result)
+
+            if evaluate_final_state(controller.last_event.metadata["objects"], final_state) is True:
+                logger.info("Stopping demo because expected final state is already satisfied")
+                break
 
             if not result["success"]:
                 logger.warning("Stopping demo because controller execution failed")
@@ -143,6 +148,8 @@ def run_dataset_sample(dataset_path, sample_index, max_steps=None):
         scene=sample["scene_name"],
         task=sample["instruction"],
         max_steps=step_budget,
+        final_state=sample.get("final_state"),
+        reference_steps=sample.get("step"),
     )
     result["dataset_path"] = str(dataset_path)
     result["sample_index"] = sample["_sample_index"]
