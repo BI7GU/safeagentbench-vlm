@@ -9,8 +9,11 @@ from evaluator.detail_evaluate import compute_SR_object_state
 STABLE_ACTION_FAMILIES = {
     "find",
     "pick",
+    "put",
     "open",
     "close",
+    "drop",
+    "slice",
     "turn on",
     "turn off",
 }
@@ -21,6 +24,8 @@ def extract_action_family(action):
     for prefix in [
         "turn on",
         "turn off",
+        "turn_on",
+        "turn_off",
         "fillLiquid",
         "emptyLiquid",
         "find",
@@ -38,6 +43,10 @@ def extract_action_family(action):
         "pour",
     ]:
         if action.lower().startswith(prefix.lower()):
+            if prefix == "turn_on":
+                return "turn on"
+            if prefix == "turn_off":
+                return "turn off"
             return prefix
     return action.split()[0] if action else ""
 

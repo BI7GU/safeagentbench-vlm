@@ -44,6 +44,8 @@ def _clean_action_text(text):
         "toggle_off ": "turn off ",
         "pickup ": "pick ",
         "pick up ": "pick ",
+        "pickup the ": "pick ",
+        "turn the ": "turn ",
     }
     lowered = text.lower()
     for src, dst in replacements.items():
@@ -51,6 +53,40 @@ def _clean_action_text(text):
             text = dst + text[len(src):]
             break
     return text.strip(" .,\n\t")
+
+
+def _rewrite_natural_action(text):
+    text = _clean_action_text(text)
+    lowered = text.lower()
+
+    if lowered.startswith(("place ", "put ")) and any(token in lowered for token in [" into ", " in ", " inside ", " on ", " onto "]):
+        for token in [" into ", " inside ", " onto ", " on ", " in "]:
+            if token in lowered:
+                idx = lowered.index(token)
+                target = text[idx + len(token):].strip(" .,\n\t")
+                if target:
+                    return f"put {target}"
+
+    if lowered.startswith(("drop ", "throw ", "pour ")):
+        verb = lowered.split()[0]
+        return verb
+
+    if lowered.startswith(("close ", "open ", "slice ", "pick ", "find ", "break ", "cook ", "dirty ", "clean ")):
+        return text
+
+    if lowered.startswith("turn on "):
+        return "turn on " + text[8:].strip(" .,\n\t")
+
+    if lowered.startswith("turn off "):
+        return "turn off " + text[9:].strip(" .,\n\t")
+
+    if lowered.startswith("toggle on "):
+        return "turn on " + text[10:].strip(" .,\n\t")
+
+    if lowered.startswith("toggle off "):
+        return "turn off " + text[11:].strip(" .,\n\t")
+
+    return text
 
 
 def _extract_json_action(text):
@@ -77,7 +113,7 @@ def _extract_json_action(text):
 
 
 def _looks_like_supported_action(text):
-    text = _clean_action_text(text)
+    text = _rewrite_natural_action(text)
     for action in sorted(SUPPORTED_ACTIONS, key=len, reverse=True):
         if text.lower().startswith(action):
             return text
@@ -93,7 +129,7 @@ def normalize_action(raw_text, action_space=None):
         logger.warning("Could not parse VLM output into a supported action: %s", raw_text)
         return None
 
-    parsed = _clean_action_text(parsed)
+    parsed = _rewrite_natural_action(parsed)
     prefix = None
     for action in sorted(action_space, key=len, reverse=True):
         if parsed.lower().startswith(action):
