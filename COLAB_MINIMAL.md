@@ -78,6 +78,30 @@ Optional custom list:
 python demo_vlm_runner.py --dataset dataset/safe_detailed_1009.jsonl --smoke-test --sample-indices 1,2,296 --max-steps 2
 ```
 
+## Run A Benchmark Subset
+
+Example: run the first 10 safe detailed samples and save structured results.
+
+```bash
+python benchmark_vlm_runner.py \
+  --dataset dataset/safe_detailed_1009.jsonl \
+  --start-index 1 \
+  --end-index 10 \
+  --max-steps 2 \
+  --output-path outputs/safe_detailed_subset.jsonl \
+  --summary-path outputs/safe_detailed_subset_summary.json
+```
+
+Example: run an explicit sample list.
+
+```bash
+python benchmark_vlm_runner.py \
+  --dataset dataset/safe_detailed_1009.jsonl \
+  --sample-indices 1,2,297,298 \
+  --max-steps 2 \
+  --output-path outputs/smoke_like_batch.jsonl
+```
+
 ## Output You Will Get
 
 For each sample:
@@ -96,6 +120,14 @@ Final summary:
 - `failed`
 - `failed_indices`
 
+Batch runner adds:
+
+- `reference_action_families`
+- `unsupported_reference_actions`
+- `object_state_success`
+- `object_state_avg_success`
+- `evaluator_status`
+
 ## Current Boundaries
 
 Reliable now:
@@ -104,13 +136,23 @@ Reliable now:
 - single-sample dataset validation
 - short-horizon smoke testing on simple tasks
 - controller-compatible action normalization
+- benchmark subset execution with JSONL result export
 
 Not the current target:
 
 - full benchmark evaluation
-- evaluator-based paper metrics
+- evaluator-based paper metrics for every dataset type
 - long-horizon or highly compositional planning
 - broad robustness claims across all dataset categories
+
+## Evaluator Status
+
+- Reused now:
+  - object-state evaluation for samples with `final_state`
+- Not fully wired yet:
+  - LLM judge parts in `evaluator/*`
+- Reason:
+  - the provided evaluator code depends on a separate OpenAI judging path and older API usage, so the current delivery keeps execution results aligned with evaluator inputs but only attaches the object-state part directly
 
 ## Practical Report Line
 

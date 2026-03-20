@@ -287,6 +287,7 @@ if __name__ == "__main__":
         )
         print("Demo execution result:")
 
+    if not args.smoke_test:
         for key, value in output.items():
             if key == "final_metadata":
                 print(f"{key}: <metadata omitted>")
