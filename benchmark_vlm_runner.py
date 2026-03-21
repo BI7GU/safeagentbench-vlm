@@ -16,6 +16,7 @@ STABLE_ACTION_FAMILIES = {
     "slice",
     "turn on",
     "turn off",
+    "fillLiquid",
 }
 
 
@@ -98,10 +99,13 @@ def build_result_record(dataset_path, sample_index, max_steps):
 
         return {
             "sample_index": sample_index,
+            "idx": sample_index,
             "dataset_path": str(dataset_path),
             "scene_name": sample["scene_name"],
+            "scene": sample["scene_name"],
             "instruction": sample["instruction"],
             "result_type": result_type,
+            "final_status": result_type,
             "predicted_actions": result["history"],
             "execution_summary": summarize_execution(result["execution_log"]),
             "final_state_success": result["final_state_success"],
@@ -112,15 +116,22 @@ def build_result_record(dataset_path, sample_index, max_steps):
             "object_state_success": object_state_success,
             "object_state_avg_success": object_state_avg,
             "error": result.get("error"),
+            "fail_type": result.get("fail_type"),
+            "fail_step": result.get("fail_step"),
+            "raw_vlm_output": result["raw_vlm_outputs"][-1] if result.get("raw_vlm_outputs") else None,
+            "controller_error": result.get("controller_error"),
             "evaluator_status": "object_state_only",
         }
     except Exception as exc:
         return {
             "sample_index": sample_index,
+            "idx": sample_index,
             "dataset_path": str(dataset_path),
             "scene_name": sample["scene_name"],
+            "scene": sample["scene_name"],
             "instruction": sample["instruction"],
             "result_type": "runner_error",
+            "final_status": "runner_error",
             "predicted_actions": [],
             "execution_summary": [],
             "final_state_success": False,
@@ -131,6 +142,10 @@ def build_result_record(dataset_path, sample_index, max_steps):
             "object_state_success": None,
             "object_state_avg_success": None,
             "error": str(exc),
+            "fail_type": "runner_exception",
+            "fail_step": None,
+            "raw_vlm_output": None,
+            "controller_error": None,
             "evaluator_status": "object_state_only",
         }
 
@@ -143,6 +158,33 @@ def write_jsonl(path, records):
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def append_jsonl(path, record):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def load_completed_indices(path):
+    path = Path(path)
+    if not path.exists():
+        return set()
+    completed = set()
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            idx = record.get("sample_index") or record.get("idx")
+            if idx is not None:
+                completed.add(int(idx))
+    return completed
+
+
 def summarize_records(records):
     summary = {
         "total": len(records),
@@ -150,6 +192,7 @@ def summarize_records(records):
         "pre_satisfied": 0,
         "unsupported": 0,
         "failed": 0,
+        "infra_failure": 0,
         "runner_error": 0,
         "failed_indices": [],
     }
@@ -157,7 +200,7 @@ def summarize_records(records):
         result_type = record["result_type"]
         if result_type in summary:
             summary[result_type] += 1
-        if result_type not in {"solved", "pre_satisfied"}:
+        if result_type == "failed":
             summary["failed_indices"].append(record["sample_index"])
     return summary
 
@@ -169,9 +212,11 @@ def parse_args():
     parser.add_argument("--start-index", type=int, default=None, help="1-based inclusive start index")
     parser.add_argument("--end-index", type=int, default=None, help="1-based inclusive end index")
     parser.add_argument("--max-samples", type=int, default=None, help="Optional cap after index selection")
-    parser.add_argument("--max-steps", type=int, default=2)
+    parser.add_argument("--max-steps", type=int, default=None)
     parser.add_argument("--output-path", required=True, help="JSONL output file path")
     parser.add_argument("--summary-path", default=None, help="Optional JSON summary path")
+    parser.add_argument("--batch-size", type=int, default=10, help="Checkpoint summary every N samples")
+    parser.add_argument("--resume", action="store_true", help="Skip samples already present in output-path")
     return parser.parse_args()
 
 
@@ -184,10 +229,35 @@ def main():
         end_index=args.end_index,
         max_samples=args.max_samples,
     )
-    records = [build_result_record(args.dataset, sample_index, args.max_steps) for sample_index in indices]
-    summary = summarize_records(records)
+    output_path = Path(args.output_path)
+    if output_path.exists() and not args.resume:
+        output_path.unlink()
+    completed = load_completed_indices(output_path) if args.resume else set()
+    records = []
+    if args.resume:
+        for line in output_path.open() if output_path.exists() else []:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
 
-    write_jsonl(args.output_path, records)
+    pending = [idx for idx in indices if idx not in completed]
+    for count, sample_index in enumerate(pending, start=1):
+        record = build_result_record(args.dataset, sample_index, args.max_steps)
+        append_jsonl(output_path, record)
+        records.append(record)
+        print(
+            f"idx={record['sample_index']} | instruction={record['instruction']} | "
+            f"final_status={record['final_status']} | fail_type={record.get('fail_type')} | fail_step={record.get('fail_step')}"
+        )
+        if args.summary_path and count % args.batch_size == 0:
+            summary = summarize_records(records)
+            Path(args.summary_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.summary_path).write_text(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    summary = summarize_records(records)
     if args.summary_path:
         Path(args.summary_path).parent.mkdir(parents=True, exist_ok=True)
         Path(args.summary_path).write_text(json.dumps(summary, ensure_ascii=False, indent=2))

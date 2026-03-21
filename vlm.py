@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import requests
@@ -16,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 
 class RemoteVLMError(Exception):
-    pass
+    def __init__(self, message, error_type="unknown"):
+        super().__init__(message)
+        self.error_type = error_type
 
 
 def get_required_env(name):
@@ -51,12 +54,16 @@ class RemoteVLMClient:
         model=None,
         timeout=60,
         user="andy",
+        max_retries=2,
+        retry_delay=1.5,
     ):
         self.api_key = api_key or get_required_env("VLM_API_SECRET_KEY")
         self.base_url = base_url or os.getenv("VLM_BASE_URL") or DEFAULT_BASE_URL
         self.model = model or os.getenv("VLM_MODEL") or DEFAULT_MODEL
         self.timeout = timeout
         self.user = user
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
     def _build_payload(self, image_path, user_prompt, temperature=0.2, max_tokens=512):
         image_base64 = encode_image_to_base64(image_path)
@@ -98,27 +105,42 @@ class RemoteVLMClient:
         }
 
         logger.info("Calling remote VLM model=%s image=%s", self.model, image_path)
-        try:
-            response = requests.post(
-                self.base_url,
-                headers=headers,
-                data=json.dumps(payload),
-                timeout=self.timeout,
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                response = requests.post(
+                    self.base_url,
+                    headers=headers,
+                    data=json.dumps(payload),
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                logger.info("Remote VLM call succeeded")
+                return content
+            except requests.ReadTimeout as exc:
+                last_error = RemoteVLMError("Remote VLM read timeout", error_type="read_timeout")
+            except requests.ConnectTimeout as exc:
+                last_error = RemoteVLMError("Remote VLM connection timeout", error_type="connect_timeout")
+            except requests.ConnectionError as exc:
+                last_error = RemoteVLMError("Remote VLM connection error", error_type="connection_error")
+            except requests.RequestException as exc:
+                body = exc.response.text if exc.response is not None else str(exc)
+                last_error = RemoteVLMError(f"Remote VLM request failed: {body}", error_type="request_error")
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                logger.exception("Remote VLM response parsing failed")
+                raise RemoteVLMError("Remote VLM response parsing failed", error_type="response_parse_error") from exc
+
+            logger.warning(
+                "Remote VLM call failed on attempt %s/%s: %s",
+                attempt + 1,
+                self.max_retries + 1,
+                last_error,
             )
-            response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            logger.info("Remote VLM call succeeded")
-            return content
-        except requests.Timeout as exc:
-            logger.exception("Remote VLM request timed out")
-            raise RemoteVLMError("Remote VLM request timed out") from exc
-        except requests.RequestException as exc:
-            body = exc.response.text if exc.response is not None else str(exc)
-            logger.exception("Remote VLM request failed")
-            raise RemoteVLMError(f"Remote VLM request failed: {body}") from exc
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            logger.exception("Remote VLM response parsing failed")
-            raise RemoteVLMError("Remote VLM response parsing failed") from exc
+            if attempt < self.max_retries:
+                time.sleep(self.retry_delay)
+
+        raise last_error
 
     def generate_from_frame(self, frame, user_prompt, temperature=0.2, max_tokens=512):
         temp_path = save_frame_to_temp_image(frame)

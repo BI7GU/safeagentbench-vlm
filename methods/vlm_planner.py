@@ -42,6 +42,10 @@ def _clean_action_text(text):
         "turn_off ": "turn off ",
         "toggle_on ": "turn on ",
         "toggle_off ": "turn off ",
+        "fill liquid ": "fillLiquid ",
+        "fillliquid ": "fillLiquid ",
+        "empty liquid ": "emptyLiquid ",
+        "emptyliquid ": "emptyLiquid ",
         "pickup ": "pick ",
         "pick up ": "pick ",
         "pickup the ": "pick ",
@@ -71,6 +75,27 @@ def _rewrite_natural_action(text):
         verb = lowered.split()[0]
         return verb
 
+    if lowered.startswith("fill "):
+        parts = text.split()
+        if len(parts) >= 3 and parts[-1].lower() in LIQUIDS:
+            target = " ".join(parts[1:-1]).strip(" .,\n\t")
+            liquid = parts[-1].lower()
+            if target:
+                return f"fillLiquid {target} {liquid}"
+
+    if lowered.startswith("fillliquid ") or lowered.startswith("fillLiquid ".lower()):
+        parts = text.split()
+        if len(parts) >= 3 and parts[-1].lower() in LIQUIDS:
+            target = " ".join(parts[1:-1]).strip(" .,\n\t")
+            liquid = parts[-1].lower()
+            if target:
+                return f"fillLiquid {target} {liquid}"
+
+    if lowered.startswith("empty "):
+        target = text[6:].strip(" .,\n\t")
+        if target:
+            return f"emptyLiquid {target}"
+
     if lowered.startswith(("close ", "open ", "slice ", "pick ", "find ", "break ", "cook ", "dirty ", "clean ")):
         return text
 
@@ -99,14 +124,19 @@ def _extract_json_action(text):
         return None
 
     action = data.get("action")
-    target = data.get("target")
+    target = data.get("target") or data.get("object") or data.get("receptacle")
     liquid = data.get("liquid")
     if not action:
         return None
+    action = _rewrite_natural_action(str(action))
+    if action.lower() == "fillliquid":
+        action = "fillLiquid"
+    if action.lower() == "emptyliquid":
+        action = "emptyLiquid"
     if action in ACTIONS_WITHOUT_OBJECT:
         return action
-    if action == "fillLiquid" and target and liquid in LIQUIDS:
-        return f"{action} {target} {liquid}"
+    if action == "fillLiquid" and target and str(liquid).lower() in LIQUIDS:
+        return f"{action} {target} {str(liquid).lower()}"
     if target:
         return f"{action} {target}"
     return action
@@ -115,7 +145,7 @@ def _extract_json_action(text):
 def _looks_like_supported_action(text):
     text = _rewrite_natural_action(text)
     for action in sorted(SUPPORTED_ACTIONS, key=len, reverse=True):
-        if text.lower().startswith(action):
+        if text.lower().startswith(action.lower()):
             return text
     return None
 
@@ -132,7 +162,7 @@ def normalize_action(raw_text, action_space=None):
     parsed = _rewrite_natural_action(parsed)
     prefix = None
     for action in sorted(action_space, key=len, reverse=True):
-        if parsed.lower().startswith(action):
+        if parsed.lower().startswith(action.lower()):
             prefix = action
             break
     if prefix is None:
@@ -188,14 +218,48 @@ class VLMPlanner:
             action_space=action_space,
             reference_steps=reference_steps,
         )
+        info = self.predict_action_with_info(
+            image_path=image_path,
+            task=task,
+            history=history,
+            action_space=action_space,
+            reference_steps=reference_steps,
+        )
+        if info["action"] is None:
+            raise RemoteVLMError(f"VLM output is not a valid controller action: {info['raw_output']}")
+        return info["action"]
+
+    def predict_action_from_frame(self, frame, task, history=None, action_space=None, reference_steps=None):
+        info = self.predict_action_from_frame_with_info(
+            frame=frame,
+            task=task,
+            history=history,
+            action_space=action_space,
+            reference_steps=reference_steps,
+        )
+        if info["action"] is None:
+            raise RemoteVLMError(f"VLM output is not a valid controller action: {info['raw_output']}")
+        return info["action"]
+
+    def predict_action_with_info(self, image_path, task, history=None, action_space=None, reference_steps=None):
+        action_space = action_space or self.action_space
+        prompt = build_vlm_prompt(
+            task=task,
+            history=history or [],
+            action_space=action_space,
+            reference_steps=reference_steps,
+        )
         raw_output = self.vlm_client.generate_from_image_path(image_path, prompt)
         logger.info("Raw VLM output: %s", raw_output)
         action = normalize_action(raw_output, action_space=action_space)
-        if action is None:
-            raise RemoteVLMError(f"VLM output is not a valid controller action: {raw_output}")
-        return action
+        return {
+            "raw_output": raw_output,
+            "normalized_output": _rewrite_natural_action(raw_output),
+            "action": action,
+            "parse_error": None if action is not None else "unsupported_or_unparseable_output",
+        }
 
-    def predict_action_from_frame(self, frame, task, history=None, action_space=None, reference_steps=None):
+    def predict_action_from_frame_with_info(self, frame, task, history=None, action_space=None, reference_steps=None):
         action_space = action_space or self.action_space
         prompt = build_vlm_prompt(
             task=task,
@@ -206,9 +270,12 @@ class VLMPlanner:
         raw_output = self.vlm_client.generate_from_frame(frame, prompt)
         logger.info("Raw VLM output: %s", raw_output)
         action = normalize_action(raw_output, action_space=action_space)
-        if action is None:
-            raise RemoteVLMError(f"VLM output is not a valid controller action: {raw_output}")
-        return action
+        return {
+            "raw_output": raw_output,
+            "normalized_output": _rewrite_natural_action(raw_output),
+            "action": action,
+            "parse_error": None if action is not None else "unsupported_or_unparseable_output",
+        }
 
 
 def predict_action(image_path, task, history, action_space=None, reference_steps=None):
