@@ -199,7 +199,26 @@ def normalize_step_for_match(step):
     return normalized or step.strip()
 
 
-def compute_reference_progress(history, reference_steps):
+def semantic_step_matches(action, reference_step, task=None, history=None):
+    action_norm = normalize_step_for_match(action)
+    ref_norm = normalize_step_for_match(reference_step)
+    if action_norm == ref_norm:
+        return True
+
+    task_text = (task or "").lower()
+    ref_family = extract_action_family(ref_norm)
+    action_family = extract_action_family(action_norm)
+
+    if action_family == "drop" and ref_family in {"drop", "put"}:
+        if " floor" in f" {task_text} " or " near " in f" {task_text} " or " next to " in f" {task_text} ":
+            return True
+        if ref_norm == "put floor":
+            return True
+
+    return False
+
+
+def compute_reference_progress(history, reference_steps, task=None):
     if not reference_steps:
         return 0
     normalized_refs = [normalize_step_for_match(step) for step in reference_steps]
@@ -207,17 +226,17 @@ def compute_reference_progress(history, reference_steps):
     for action in history:
         if progress >= len(normalized_refs):
             break
-        normalized_action = normalize_step_for_match(action)
-        if normalized_action == normalized_refs[progress]:
+        if semantic_step_matches(action, normalized_refs[progress], task=task, history=history):
             progress += 1
     return progress
 
 
-def goal_or_reference_satisfied(metadata, final_state, history, reference_steps):
+def goal_or_reference_satisfied(metadata, final_state, history, reference_steps, task=None):
     goal_satisfied = evaluate_final_state(metadata["objects"], final_state) is True
-    ref_progress = compute_reference_progress(history, reference_steps)
-    ref_satisfied = bool(reference_steps) and ref_progress >= len(reference_steps)
-    return goal_satisfied or ref_satisfied, ref_progress
+    ref_progress = compute_reference_progress(history, reference_steps, task=task)
+    if reference_steps:
+        return ref_progress >= len(reference_steps), ref_progress
+    return goal_satisfied, ref_progress
 
 
 def build_progress_signature(metadata, final_state):
@@ -422,7 +441,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
         controller_error = None
         no_progress_counter = 0
         last_goal_count = compute_goal_satisfied_count(controller.last_event.metadata["objects"], final_state)
-        last_ref_progress = compute_reference_progress(history, reference_steps)
+        last_ref_progress = compute_reference_progress(history, reference_steps, task=task)
         last_signature = build_progress_signature(controller.last_event.metadata, final_state)
         if pre_satisfied:
             logger.info("Initial scene already satisfies expected final state")
@@ -546,7 +565,25 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
             guard = guard_action_before_execution(action, controller.last_event.metadata)
             if guard["status"] == "rewrite":
                 logger.info(guard["message"])
-                open_result = planner.llm_skill_interact(guard["replacement"])
+                try:
+                    open_result = planner.llm_skill_interact(guard["replacement"])
+                except Exception as exc:
+                    fail_type = "controller_exception"
+                    fail_step = step_idx + 1
+                    controller_error = str(exc)
+                    final_status = "failed"
+                    execution_log.append(
+                        build_execution_entry(
+                            action=guard["replacement"],
+                            success=False,
+                            message=str(exc),
+                            raw_vlm_output=planner_info["raw_output"],
+                            normalized_output=planner_info["normalized_output"],
+                            fail_type=fail_type,
+                            fail_step=fail_step,
+                        )
+                    )
+                    break
                 execution_log.append(
                     build_execution_entry(
                         action=guard["replacement"],
@@ -587,6 +624,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                     final_state,
                     history,
                     reference_steps,
+                    task=task,
                 )
                 if completed:
                     final_status = "pre_satisfied" if pre_satisfied else "solved"
@@ -612,7 +650,25 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
 
             metadata_before = controller.last_event.metadata
             held_before = get_inventory_types(metadata_before)
-            result = planner.llm_skill_interact(action)
+            try:
+                result = planner.llm_skill_interact(action)
+            except Exception as exc:
+                fail_type = "controller_exception"
+                fail_step = step_idx + 1
+                controller_error = str(exc)
+                execution_log.append(
+                    build_execution_entry(
+                        action=action,
+                        success=False,
+                        message=str(exc),
+                        raw_vlm_output=planner_info["raw_output"],
+                        normalized_output=planner_info["normalized_output"],
+                        fail_type=fail_type,
+                        fail_step=fail_step,
+                    )
+                )
+                final_status = "failed"
+                break
             logger.info("Execution result: %s", result)
             metadata_after = controller.last_event.metadata
             held_after = get_inventory_types(metadata_after)
@@ -623,7 +679,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 held_before,
                 held_after,
                 compute_goal_satisfied_count(metadata_after["objects"], final_state),
-                compute_reference_progress(history, reference_steps),
+                compute_reference_progress(history, reference_steps, task=task),
                 len(reference_steps or []),
                 no_progress_counter,
             )
@@ -640,11 +696,13 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 if "closed" in lowered_error:
                     step_fail_type = "receptacle_closed"
                 elif "no valid positions" in lowered_error:
-                    step_fail_type = "no_valid_positions"
+                    step_fail_type = "put_no_valid_position"
                 elif "not holding" in lowered_msg:
                     step_fail_type = "not_holding_object"
                 elif "invalid" in lowered_error:
                     step_fail_type = "invalid_object_type"
+                elif not result["success"]:
+                    step_fail_type = "receptacle_put_failed"
             execution_log.append(
                 build_execution_entry(
                     action=action,
@@ -659,7 +717,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
             )
 
             current_goal_count = compute_goal_satisfied_count(metadata_after["objects"], final_state)
-            current_ref_progress = compute_reference_progress(history, reference_steps)
+            current_ref_progress = compute_reference_progress(history, reference_steps, task=task)
             current_signature = build_progress_signature(metadata_after, final_state)
             if current_goal_count == last_goal_count and current_signature == last_signature and current_ref_progress == last_ref_progress:
                 no_progress_counter += 1
@@ -674,6 +732,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 final_state,
                 history,
                 reference_steps,
+                task=task,
             )
             if completed:
                 logger.info("Stopping demo because expected final state is already satisfied")

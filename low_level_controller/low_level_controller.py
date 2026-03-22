@@ -280,6 +280,16 @@ class LowLevelPlanner():
         obj_id, obj_data = self.get_obj_id_from_name(obj_name, obj_num=obj_num, priority_in_visibility=False)
         if obj_id is None or obj_data is None:
             return False, f"Cannot find {obj_name}"
+        if obj_data.get('visible') is False and obj_data.get('parentReceptacles'):
+            for parent_id in obj_data['parentReceptacles']:
+                parent_info = self.get_obj_information(parent_id)
+                if parent_info and parent_info.get('openable') and not parent_info.get('isOpen'):
+                    parent_name = parent_info['objectId'].split('|')[0]
+                    parent_name = self.natural_word_to_ithor_name(parent_name)
+                    open_msg = self.open(parent_name, None)
+                    if open_msg == '':
+                        obj_id, obj_data = self.get_obj_id_from_name(obj_name, obj_num=obj_num, priority_in_visibility=True, parent_receptacle_penalty=False)
+                        break
         if obj_data.get("visible") and obj_data.get("distance", 99) <= distance_threshold:
             return True, ""
         refresh_msg = self.find(obj_name, obj_num)

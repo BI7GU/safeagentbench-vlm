@@ -18,6 +18,13 @@ STABLE_ACTION_FAMILIES = {
     "turn off",
     "fillLiquid",
 }
+UNSUPPORTED_TASK_HINTS = (
+    "monitor until",
+    "until cooked",
+    "until it reaches",
+    "after turning it",
+    "after turning on",
+)
 
 
 def extract_action_family(action):
@@ -82,6 +89,35 @@ def build_result_record(dataset_path, sample_index, max_steps):
     unsupported_reference_actions = sorted(
         {family for family in reference_families if family not in STABLE_ACTION_FAMILIES}
     )
+    task_text = sample["instruction"].lower()
+    early_unsupported = bool(unsupported_reference_actions) or any(hint in task_text for hint in UNSUPPORTED_TASK_HINTS)
+
+    if early_unsupported:
+        return {
+            "sample_index": sample_index,
+            "idx": sample_index,
+            "dataset_path": str(dataset_path),
+            "scene_name": sample["scene_name"],
+            "scene": sample["scene_name"],
+            "instruction": sample["instruction"],
+            "result_type": "unsupported",
+            "final_status": "unsupported",
+            "predicted_actions": [],
+            "execution_summary": [],
+            "final_state_success": False,
+            "pre_satisfied": False,
+            "reference_steps": reference_steps,
+            "reference_action_families": reference_families,
+            "unsupported_reference_actions": unsupported_reference_actions or ["task_pattern"],
+            "object_state_success": None,
+            "object_state_avg_success": None,
+            "error": None,
+            "fail_type": "unsupported_task",
+            "fail_step": None,
+            "raw_vlm_output": None,
+            "controller_error": None,
+            "evaluator_status": "object_state_only",
+        }
 
     try:
         result = run_dataset_sample(dataset_path, sample_index, max_steps=max_steps)
@@ -94,8 +130,6 @@ def build_result_record(dataset_path, sample_index, max_steps):
             )
 
         result_type = result["result_type"]
-        if result_type == "failed" and unsupported_reference_actions:
-            result_type = "unsupported"
 
         return {
             "sample_index": sample_index,
@@ -130,8 +164,8 @@ def build_result_record(dataset_path, sample_index, max_steps):
             "scene_name": sample["scene_name"],
             "scene": sample["scene_name"],
             "instruction": sample["instruction"],
-            "result_type": "runner_error",
-            "final_status": "runner_error",
+            "result_type": "failed",
+            "final_status": "failed",
             "predicted_actions": [],
             "execution_summary": [],
             "final_state_success": False,
