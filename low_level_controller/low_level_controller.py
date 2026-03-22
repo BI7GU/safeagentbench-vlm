@@ -787,11 +787,19 @@ class LowLevelPlanner():
         else:
             holding_obj_id = self.env.last_event.metadata['inventoryObjects'][0]['objectId']
 
+        recep_id, recep_data = self.get_obj_id_from_name(receptacle_name, obj_num=obj_num, parent_receptacle_penalty=False)
+        if recep_id is None or recep_data is None:
+            return f'Cannot find {receptacle_name} {obj_num}'
+        if recep_data.get('receptacle') is not True:
+            return f'Invalid placement target {receptacle_name}'
+
         halt = False
         last_recep_id = None
         exclude_obj_id = None
+        no_valid_position_failures = 0
+        max_no_valid_position_failures = 2
         for k in range(2):  # try closest and next closest one
-            for j in range(18):  # move/look around or rotate obj, with a final placement fallback
+            for j in range(8):  # tighter retry budget to avoid long useless loops
                 for i in range(2):  # try inherited receptacles too (e.g., sink basin, bath basin)
                     if k == 1 and exclude_obj_id is None:
                         exclude_obj_id = last_recep_id  # previous recep id
@@ -850,20 +858,19 @@ class LowLevelPlanner():
                     elif j == 15:
                         for r in range(8):
                             self.env.step(dict(action="MoveLeft"))
-                    elif j == 16:
-                        for r in range(4):
-                            self.env.step(dict(action="MoveRight"))
-                        self.env.step(dict(  # this somehow make putobject success in some cases
-                            action="RotateRight",
-                            degrees=15
-                        ))
-                    elif j == 17:
+                    elif j == 7:
                         event = self.env.step(
                             action="GetSpawnCoordinatesAboveReceptacle",
                             objectId=recep_id,
                             anywhere=False
                         )
                         position_above = event.metadata['actionReturn']
+                        if not position_above:
+                            ret_msg = f'No valid positions to place object found for {receptacle_name}'
+                            no_valid_position_failures += 1
+                            if no_valid_position_failures >= max_no_valid_position_failures:
+                                return ret_msg
+                            continue
                         self.env.step(
                             action="PlaceObjectAtPoint",
                             objectId=holding_obj_id,
@@ -885,8 +892,13 @@ class LowLevelPlanner():
                         ))
                     
                         if not self.env.last_event.metadata['lastActionSuccess']:
-                            if j == 16:
-                                log.warning(f"PutObject action failed: {self.env.last_event.metadata['errorMessage']}, trying again...")
+                            error_msg = self.env.last_event.metadata['errorMessage']
+                            if 'No valid positions to place object found' in error_msg:
+                                no_valid_position_failures += 1
+                                ret_msg = f'No valid positions to place object found for {receptacle_name}'
+                                if no_valid_position_failures >= max_no_valid_position_failures:
+                                    return ret_msg
+                            else:
                                 ret_msg = f'Putting the object on {receptacle_name} failed'
                         else:
                             ret_msg = ''
@@ -894,12 +906,12 @@ class LowLevelPlanner():
                             break
                     else:
 
-                        if recep_id in obj_info['parentReceptacles']:
+                        parent_receptacles = obj_info.get('parentReceptacles') or []
+                        if recep_id in parent_receptacles:
                             ret_msg = ''
                             halt = True
                             break
                         else:
-                            log.warning(f"PutObject action failed: {self.env.last_event.metadata['errorMessage']}, trying again...")
                             ret_msg = f'Putting the object on {receptacle_name} failed'
                             
                 if halt:

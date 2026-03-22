@@ -695,8 +695,10 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 lowered_msg = (result.get("message") or "").lower()
                 if "closed" in lowered_error:
                     step_fail_type = "receptacle_closed"
-                elif "no valid positions" in lowered_error:
+                elif "no valid positions" in lowered_error or "no valid positions" in lowered_msg:
                     step_fail_type = "put_no_valid_position"
+                elif "invalid placement target" in lowered_msg:
+                    step_fail_type = "invalid_placement_target"
                 elif "not holding" in lowered_msg:
                     step_fail_type = "not_holding_object"
                 elif "invalid" in lowered_error:
@@ -759,6 +761,11 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 fail_type = "step_budget_exhausted"
                 final_status = "failed"
 
+        if final_status in {"solved", "pre_satisfied"}:
+            fail_type = None
+            fail_step = None
+            controller_error = None
+
         return {
             "scene": scene,
             "task": task,
@@ -814,6 +821,8 @@ def run_dataset_sample(dataset_path, sample_index, max_steps=None):
         result["result_type"] = "solved"
     else:
         result["result_type"] = "failed"
+        if result.get("fail_type") is None:
+            result["fail_type"] = "unknown_failure"
     logger.info(
         "Sample summary | idx=%s | instruction=%s | final_status=%s | fail_type=%s | fail_step=%s",
         sample["_sample_index"],
