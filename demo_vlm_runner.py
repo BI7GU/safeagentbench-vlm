@@ -7,7 +7,7 @@ from pathlib import Path
 from ai2thor.controller import Controller
 
 from low_level_controller.low_level_controller import LowLevelPlanner
-from methods.vlm_planner import SUPPORTED_ACTIONS, VLMPlanner, canonicalize_target_name
+from methods.vlm_planner import SUPPORTED_ACTIONS, VLMPlanner, canonicalize_target_name, normalize_action
 from vlm import RemoteVLMError
 
 
@@ -90,10 +90,19 @@ def evaluate_final_state(objects, final_state):
 
 def get_object_by_type(objects, object_type):
     object_type = canonicalize_target_name(object_type or "").strip().lower()
+    matches = [obj for obj in objects if obj["objectType"].lower() == object_type]
+    if not matches:
+        return None
+    matches.sort(key=lambda obj: (not obj.get("visible", False), obj.get("distance", 9999)))
+    return matches[0]
+
+
+def any_object_of_type_has_state(objects, object_type, key, value):
+    object_type = canonicalize_target_name(object_type or "").strip().lower()
     for obj in objects:
-        if obj["objectType"].lower() == object_type:
-            return obj
-    return None
+        if obj["objectType"].lower() == object_type and obj.get(key) == value:
+            return True
+    return False
 
 
 def infer_step_budget(task, reference_steps=None, explicit_max_steps=None):
@@ -185,6 +194,32 @@ def compute_goal_satisfied_count(objects, final_state):
     return count
 
 
+def normalize_step_for_match(step):
+    normalized = normalize_action(step, action_space=SUPPORTED_ACTIONS)
+    return normalized or step.strip()
+
+
+def compute_reference_progress(history, reference_steps):
+    if not reference_steps:
+        return 0
+    normalized_refs = [normalize_step_for_match(step) for step in reference_steps]
+    progress = 0
+    for action in history:
+        if progress >= len(normalized_refs):
+            break
+        normalized_action = normalize_step_for_match(action)
+        if normalized_action == normalized_refs[progress]:
+            progress += 1
+    return progress
+
+
+def goal_or_reference_satisfied(metadata, final_state, history, reference_steps):
+    goal_satisfied = evaluate_final_state(metadata["objects"], final_state) is True
+    ref_progress = compute_reference_progress(history, reference_steps)
+    ref_satisfied = bool(reference_steps) and ref_progress >= len(reference_steps)
+    return goal_satisfied or ref_satisfied, ref_progress
+
+
 def build_progress_signature(metadata, final_state):
     inventory = tuple(sorted(get_inventory_types(metadata)))
     if final_state:
@@ -222,15 +257,15 @@ def action_postcheck(action, metadata_before, metadata_after):
             return False, "pick_not_holding"
         return True, None
     if family == "fillLiquid":
-        if after_target is None or after_target.get("isFilledWithLiquid") is not True:
+        if after_target is None or not any_object_of_type_has_state(metadata_after["objects"], target, "isFilledWithLiquid", True):
             return False, "fill_not_filled"
         return True, None
     if family == "turn on":
-        if after_target is None or after_target.get("isToggled") is not True:
+        if after_target is None or not any_object_of_type_has_state(metadata_after["objects"], target, "isToggled", True):
             return False, "toggle_state_not_changed"
         return True, None
     if family == "turn off":
-        if after_target is None or after_target.get("isToggled") is not False:
+        if after_target is None or not any_object_of_type_has_state(metadata_after["objects"], target, "isToggled", False):
             return False, "toggle_state_not_changed"
         return True, None
     if family == "put":
@@ -238,15 +273,15 @@ def action_postcheck(action, metadata_before, metadata_after):
             return False, "put_still_holding"
         return True, None
     if family == "open":
-        if after_target is None or after_target.get("isOpen") is not True:
+        if after_target is None or not any_object_of_type_has_state(metadata_after["objects"], target, "isOpen", True):
             return False, "open_state_not_changed"
         return True, None
     if family == "close":
-        if after_target is None or after_target.get("isOpen") is not False:
+        if after_target is None or not any_object_of_type_has_state(metadata_after["objects"], target, "isOpen", False):
             return False, "close_state_not_changed"
         return True, None
     if family == "clean":
-        if after_target is None or after_target.get("isDirty") is not False:
+        if after_target is None or not any_object_of_type_has_state(metadata_after["objects"], target, "isDirty", False):
             return False, "clean_state_not_changed"
         return True, None
     if family == "drop":
@@ -306,6 +341,12 @@ def guard_action_before_execution(action, metadata):
                 "reason": "receptacle_closed",
                 "replacement": f"open {target_name}",
                 "message": f"Receptacle {target_name} is closed; reopening before put.",
+            }
+        if target_obj and target_obj.get("receptacle") is not True:
+            return {
+                "status": "block",
+                "reason": "invalid_object_type",
+                "message": f"Cannot put into non-receptacle target {target_name}.",
             }
         if target_obj and holding_type and holding_type == target_obj["objectType"]:
             return {
@@ -381,6 +422,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
         controller_error = None
         no_progress_counter = 0
         last_goal_count = compute_goal_satisfied_count(controller.last_event.metadata["objects"], final_state)
+        last_ref_progress = compute_reference_progress(history, reference_steps)
         last_signature = build_progress_signature(controller.last_event.metadata, final_state)
         if pre_satisfied:
             logger.info("Initial scene already satisfies expected final state")
@@ -540,6 +582,15 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 if evaluate_final_state(controller.last_event.metadata["objects"], final_state) is True:
                     final_status = "pre_satisfied" if pre_satisfied else "solved"
                     break
+                completed, current_ref_progress = goal_or_reference_satisfied(
+                    controller.last_event.metadata,
+                    final_state,
+                    history,
+                    reference_steps,
+                )
+                if completed:
+                    final_status = "pre_satisfied" if pre_satisfied else "solved"
+                    break
                 continue
             elif guard["status"] == "block":
                 logger.warning(guard["message"])
@@ -566,12 +617,14 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
             metadata_after = controller.last_event.metadata
             held_after = get_inventory_types(metadata_after)
             logger.info(
-                "Action detail | action=%s | canonical_target=%s | held_before=%s | held_after=%s | goal_satisfied=%s | no_progress=%s",
+                "Action detail | action=%s | canonical_target=%s | held_before=%s | held_after=%s | goal_satisfied=%s | ref_progress=%s/%s | no_progress=%s",
                 action,
                 extract_action_target(action),
                 held_before,
                 held_after,
                 compute_goal_satisfied_count(metadata_after["objects"], final_state),
+                compute_reference_progress(history, reference_steps),
+                len(reference_steps or []),
                 no_progress_counter,
             )
 
@@ -606,15 +659,23 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
             )
 
             current_goal_count = compute_goal_satisfied_count(metadata_after["objects"], final_state)
+            current_ref_progress = compute_reference_progress(history, reference_steps)
             current_signature = build_progress_signature(metadata_after, final_state)
-            if current_goal_count == last_goal_count and current_signature == last_signature:
+            if current_goal_count == last_goal_count and current_signature == last_signature and current_ref_progress == last_ref_progress:
                 no_progress_counter += 1
             else:
                 no_progress_counter = 0
             last_goal_count = current_goal_count
+            last_ref_progress = current_ref_progress
             last_signature = current_signature
 
-            if evaluate_final_state(controller.last_event.metadata["objects"], final_state) is True:
+            completed, current_ref_progress = goal_or_reference_satisfied(
+                controller.last_event.metadata,
+                final_state,
+                history,
+                reference_steps,
+            )
+            if completed:
                 logger.info("Stopping demo because expected final state is already satisfied")
                 final_status = "pre_satisfied" if pre_satisfied else "solved"
                 break

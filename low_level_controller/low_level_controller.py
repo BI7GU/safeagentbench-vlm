@@ -290,6 +290,22 @@ class LowLevelPlanner():
             return False, f"{obj_name} is not visible after refresh"
         return True, ""
 
+    def ensure_receptacle_open(self, receptacle_name, obj_num=None):
+        recep_id, recep_data = self.get_obj_id_from_name(receptacle_name, obj_num=obj_num, parent_receptacle_penalty=False)
+        if recep_id is None or recep_data is None:
+            return False, f"Cannot find {receptacle_name}"
+        if recep_data.get("openable") is not True:
+            return True, ""
+        if recep_data.get("isOpen") is True:
+            return True, ""
+        ret_msg = self.open(receptacle_name, obj_num)
+        if ret_msg:
+            return False, ret_msg
+        recep_id, recep_data = self.get_obj_id_from_name(receptacle_name, obj_num=obj_num, parent_receptacle_penalty=False)
+        if recep_data is None or recep_data.get("isOpen") is not True:
+            return False, f"{receptacle_name} is still closed after open"
+        return True, ""
+
     def find(self, target_obj, obj_num):
 
         objects = self.env.last_event.metadata['objects']
@@ -779,6 +795,11 @@ class LowLevelPlanner():
                         ret_msg = f'Cannot find {receptacle_name} {obj_num}'
                         continue
 
+                    open_ok, open_msg = self.ensure_receptacle_open(receptacle_name, obj_num=obj_num)
+                    if not open_ok:
+                        ret_msg = open_msg
+                        continue
+
                     log.info(f'put {holding_obj_id} on {recep_id}')
                     flag = False
                     # look up (put action fails when a receptacle is not visible)
@@ -975,6 +996,10 @@ class LowLevelPlanner():
 
             if not self.env.last_event.metadata['lastActionSuccess']:
                 ret_msg = f"Turn on action failed"
+            else:
+                obj_info = self.get_obj_information(obj_id)
+                if obj_info is None or obj_info.get('isToggled') is not True:
+                    ret_msg = f"Turn on action failed"
 
         return ret_msg
     
@@ -995,6 +1020,10 @@ class LowLevelPlanner():
 
             if not self.env.last_event.metadata['lastActionSuccess']:
                 ret_msg = f"Turn off action failed"
+            else:
+                obj_info = self.get_obj_information(obj_id)
+                if obj_info is None or obj_info.get('isToggled') is not False:
+                    ret_msg = f"Turn off action failed"
 
         return ret_msg
     
@@ -1016,6 +1045,10 @@ class LowLevelPlanner():
 
             if not self.env.last_event.metadata['lastActionSuccess']:
                 ret_msg = f"Close action failed"
+            else:
+                obj_info = self.get_obj_information(obj_id)
+                if obj_info is None or obj_info.get('isOpen') is not False:
+                    ret_msg = f"Close action failed"
 
         return ret_msg
 
@@ -1051,8 +1084,11 @@ class LowLevelPlanner():
                         self.env.step(action="MoveLeft")
                         self.env.step(action="MoveLeft")
                 else:
-                    ret_msg = ''
-                    break
+                    obj_info = self.get_obj_information(obj_id)
+                    if obj_info is not None and obj_info.get('isOpen') is True:
+                        ret_msg = ''
+                        break
+                    ret_msg = f"Open action failed"
 
         return ret_msg
 
