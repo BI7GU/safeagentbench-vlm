@@ -29,10 +29,35 @@ SUPPORTED_ACTIONS = [
 
 ACTIONS_WITHOUT_OBJECT = {"drop", "throw", "pour"}
 LIQUIDS = {"water", "coffee", "wine"}
+TARGET_ALIASES = {
+    "sink": "SinkBasin",
+    "sink basin": "SinkBasin",
+    "counter top": "CounterTop",
+    "countertop": "CounterTop",
+    "light switch": "LightSwitch",
+    "desk lamp": "DeskLamp",
+    "coffee table": "CoffeeTable",
+    "house plant": "HousePlant",
+    "watering can": "WateringCan",
+}
 
 
 def _normalize_whitespace(text):
     return " ".join((text or "").strip().split())
+
+
+def canonicalize_target_name(target):
+    target = _normalize_whitespace(target).strip(" .,\n\t")
+    if not target:
+        return target
+    for prefix in ("the ", "a ", "an "):
+        if target.lower().startswith(prefix):
+            target = target[len(prefix):]
+            break
+    lowered = target.lower()
+    if lowered in TARGET_ALIASES:
+        return TARGET_ALIASES[lowered]
+    return target
 
 
 def _clean_action_text(text):
@@ -67,7 +92,7 @@ def _rewrite_natural_action(text):
         for token in [" into ", " inside ", " onto ", " on ", " in "]:
             if token in lowered:
                 idx = lowered.index(token)
-                target = text[idx + len(token):].strip(" .,\n\t")
+                target = canonicalize_target_name(text[idx + len(token):].strip(" .,\n\t"))
                 if target:
                     return f"put {target}"
 
@@ -81,7 +106,7 @@ def _rewrite_natural_action(text):
             target = " ".join(parts[1:-1]).strip(" .,\n\t")
             liquid = parts[-1].lower()
             if target:
-                return f"fillLiquid {target} {liquid}"
+                return f"fillLiquid {canonicalize_target_name(target)} {liquid}"
 
     if lowered.startswith("fillliquid ") or lowered.startswith("fillLiquid ".lower()):
         parts = text.split()
@@ -89,27 +114,30 @@ def _rewrite_natural_action(text):
             target = " ".join(parts[1:-1]).strip(" .,\n\t")
             liquid = parts[-1].lower()
             if target:
-                return f"fillLiquid {target} {liquid}"
+                return f"fillLiquid {canonicalize_target_name(target)} {liquid}"
 
     if lowered.startswith("empty "):
-        target = text[6:].strip(" .,\n\t")
+        target = canonicalize_target_name(text[6:].strip(" .,\n\t"))
         if target:
             return f"emptyLiquid {target}"
 
     if lowered.startswith(("close ", "open ", "slice ", "pick ", "find ", "break ", "cook ", "dirty ", "clean ")):
+        parts = text.split(maxsplit=1)
+        if len(parts) == 2:
+            return f"{parts[0]} {canonicalize_target_name(parts[1])}"
         return text
 
     if lowered.startswith("turn on "):
-        return "turn on " + text[8:].strip(" .,\n\t")
+        return "turn on " + canonicalize_target_name(text[8:].strip(" .,\n\t"))
 
     if lowered.startswith("turn off "):
-        return "turn off " + text[9:].strip(" .,\n\t")
+        return "turn off " + canonicalize_target_name(text[9:].strip(" .,\n\t"))
 
     if lowered.startswith("toggle on "):
-        return "turn on " + text[10:].strip(" .,\n\t")
+        return "turn on " + canonicalize_target_name(text[10:].strip(" .,\n\t"))
 
     if lowered.startswith("toggle off "):
-        return "turn off " + text[11:].strip(" .,\n\t")
+        return "turn off " + canonicalize_target_name(text[11:].strip(" .,\n\t"))
 
     return text
 
@@ -136,8 +164,9 @@ def _extract_json_action(text):
     if action in ACTIONS_WITHOUT_OBJECT:
         return action
     if action == "fillLiquid" and target and str(liquid).lower() in LIQUIDS:
-        return f"{action} {target} {str(liquid).lower()}"
+        return f"{action} {canonicalize_target_name(str(target))} {str(liquid).lower()}"
     if target:
+        target = canonicalize_target_name(str(target))
         return f"{action} {target}"
     return action
 

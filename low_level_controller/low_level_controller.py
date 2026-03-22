@@ -276,6 +276,20 @@ class LowLevelPlanner():
         y = math.radians(y)
         return math.degrees(math.atan2(math.sin(x - y), math.cos(x - y)))
 
+    def ensure_object_interactable(self, obj_name, obj_num=None, distance_threshold=1.5):
+        obj_id, obj_data = self.get_obj_id_from_name(obj_name, obj_num=obj_num, priority_in_visibility=False)
+        if obj_id is None or obj_data is None:
+            return False, f"Cannot find {obj_name}"
+        if obj_data.get("visible") and obj_data.get("distance", 99) <= distance_threshold:
+            return True, ""
+        refresh_msg = self.find(obj_name, obj_num)
+        if refresh_msg:
+            return False, refresh_msg
+        obj_id, obj_data = self.get_obj_id_from_name(obj_name, obj_num=obj_num, priority_in_visibility=True)
+        if obj_id is None or obj_data is None or not obj_data.get("visible"):
+            return False, f"{obj_name} is not visible after refresh"
+        return True, ""
+
     def find(self, target_obj, obj_num):
 
         objects = self.env.last_event.metadata['objects']
@@ -398,6 +412,9 @@ class LowLevelPlanner():
     def fillLiquid(self, obj_name, obj_num, liquid_name):
         log.info(f'fillLiquid {obj_name} with {liquid_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to fill'
@@ -416,6 +433,9 @@ class LowLevelPlanner():
     def emptyLiquid(self, obj_name, obj_num):
         log.info(f'emptyLiquid {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to empty'
@@ -433,6 +453,9 @@ class LowLevelPlanner():
     def break_(self, obj_name, obj_num):
         log.info(f'break {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to break'
@@ -742,7 +765,7 @@ class LowLevelPlanner():
         last_recep_id = None
         exclude_obj_id = None
         for k in range(2):  # try closest and next closest one
-            for j in range(17):  # move/look around or rotate obj
+            for j in range(18):  # move/look around or rotate obj, with a final placement fallback
                 for i in range(2):  # try inherited receptacles too (e.g., sink basin, bath basin)
                     if k == 1 and exclude_obj_id is None:
                         exclude_obj_id = last_recep_id  # previous recep id
@@ -858,6 +881,9 @@ class LowLevelPlanner():
     def slice(self, obj_name, obj_num):
         log.info(f'slice {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to slice'
@@ -875,6 +901,9 @@ class LowLevelPlanner():
     def cook(self, obj_name, obj_num):
         log.info(f'cook {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to cook'
@@ -892,6 +921,9 @@ class LowLevelPlanner():
     def dirty(self, obj_name, obj_num):
         log.info(f'dirty {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to dirty'
@@ -909,6 +941,9 @@ class LowLevelPlanner():
     def clean(self, obj_name, obj_num):
         log.info(f'clean {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to clean'
@@ -926,6 +961,9 @@ class LowLevelPlanner():
     def turn_on(self, obj_name, obj_num):
         log.info(f'turn on {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to turn on'
@@ -943,6 +981,9 @@ class LowLevelPlanner():
     def turn_off(self, obj_name, obj_num):
         log.info(f'turn off {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to turn off'
@@ -960,6 +1001,9 @@ class LowLevelPlanner():
     def close(self, obj_name, obj_num):
         log.info(f'close {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok:
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to close'
@@ -978,6 +1022,9 @@ class LowLevelPlanner():
     def open(self, obj_name, obj_num):
         log.info(f'open {obj_name}')
         ret_msg = ''
+        ok, refresh_msg = self.ensure_object_interactable(obj_name, obj_num)
+        if not ok and "already visible" not in refresh_msg.lower():
+            return refresh_msg
         obj_id, _ = self.get_obj_id_from_name(obj_name, obj_num=obj_num)
         if obj_id is None:
             ret_msg = f'Cannot find {obj_name} to open'

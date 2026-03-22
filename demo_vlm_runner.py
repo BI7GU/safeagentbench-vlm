@@ -1,12 +1,13 @@
 import argparse
 import json
 import logging
+import time
 from pathlib import Path
 
 from ai2thor.controller import Controller
 
 from low_level_controller.low_level_controller import LowLevelPlanner
-from methods.vlm_planner import SUPPORTED_ACTIONS, VLMPlanner
+from methods.vlm_planner import SUPPORTED_ACTIONS, VLMPlanner, canonicalize_target_name
 from vlm import RemoteVLMError
 
 
@@ -18,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SMOKE_SAMPLES = [1, 2, 297, 298]
 MULTI_STAGE_HINTS = (" and ", " then ", " before ", " after ", " inside ", " close ", " turn on ")
+MAX_NO_PROGRESS_STEPS = 3
+MAX_REPEATED_ACTIONS = 2
+DEFAULT_MAX_SAMPLE_SECONDS = 120
 
 
 def load_dataset_sample(dataset_path, sample_index):
@@ -85,7 +89,7 @@ def evaluate_final_state(objects, final_state):
 
 
 def get_object_by_type(objects, object_type):
-    object_type = (object_type or "").strip().lower()
+    object_type = canonicalize_target_name(object_type or "").strip().lower()
     for obj in objects:
         if obj["objectType"].lower() == object_type:
             return obj
@@ -105,6 +109,166 @@ def infer_step_budget(task, reference_steps=None, explicit_max_steps=None):
 def classify_infra_failure(exc):
     if isinstance(exc, RemoteVLMError):
         return exc.error_type if hasattr(exc, "error_type") else "remote_vlm_error"
+    return None
+
+
+def extract_action_family(action):
+    action = (action or "").strip().lower()
+    for prefix in [
+        "turn on",
+        "turn off",
+        "fillliquid",
+        "emptyliquid",
+        "find",
+        "pick",
+        "put",
+        "open",
+        "close",
+        "slice",
+        "drop",
+        "throw",
+        "break",
+        "cook",
+        "dirty",
+        "clean",
+        "pour",
+    ]:
+        if action.startswith(prefix):
+            return prefix.replace("fillliquid", "fillLiquid").replace("emptyliquid", "emptyLiquid")
+    return action.split()[0] if action else ""
+
+
+def extract_action_target(action):
+    action = (action or "").strip()
+    family = extract_action_family(action)
+    if family in {"drop", "throw", "pour"} or not family:
+        return None
+    if family == "turn on":
+        return canonicalize_target_name(action[8:].strip())
+    if family == "turn off":
+        return canonicalize_target_name(action[9:].strip())
+    if family == "fillLiquid":
+        parts = action.split()
+        return canonicalize_target_name(" ".join(parts[1:-1]))
+    if family == "emptyLiquid":
+        return canonicalize_target_name(action.split(maxsplit=1)[1]) if len(action.split(maxsplit=1)) == 2 else None
+    parts = action.split(maxsplit=1)
+    return canonicalize_target_name(parts[1]) if len(parts) == 2 else None
+
+
+def get_inventory_types(metadata):
+    items = metadata.get("inventoryObjects", [])
+    return [item["objectId"].split("|")[0] for item in items]
+
+
+def compute_goal_satisfied_count(objects, final_state):
+    if final_state is None:
+        return 0
+    count = 0
+    for expected in final_state:
+        matches = [obj for obj in objects if obj["objectType"] == expected["objectType"]]
+        for obj in matches:
+            ok = True
+            for key, value in expected.items():
+                if key == "objectType":
+                    continue
+                if key in {"parentReceptacles", "receptacleObjectIds"}:
+                    if not is_any_element_contained(value, obj.get(key, [])):
+                        ok = False
+                        break
+                elif obj.get(key) != value:
+                    ok = False
+                    break
+            if ok:
+                count += 1
+                break
+    return count
+
+
+def build_progress_signature(metadata, final_state):
+    inventory = tuple(sorted(get_inventory_types(metadata)))
+    if final_state:
+        tracked = []
+        for expected in final_state:
+            obj = get_object_by_type(metadata["objects"], expected["objectType"])
+            if obj is None:
+                tracked.append((expected["objectType"], "missing"))
+                continue
+            state_bits = []
+            for key in sorted(k for k in expected.keys() if k != "objectType"):
+                val = obj.get(key)
+                if isinstance(val, list):
+                    val = tuple(val)
+                state_bits.append((key, val))
+            tracked.append((expected["objectType"], tuple(state_bits)))
+        return (inventory, tuple(tracked))
+    return (inventory,)
+
+
+def is_openable_receptacle(name):
+    return canonicalize_target_name(name) in {"Drawer", "Microwave", "Fridge", "Cabinet"}
+
+
+def action_postcheck(action, metadata_before, metadata_after):
+    family = extract_action_family(action)
+    target = extract_action_target(action)
+    before_target = get_object_by_type(metadata_before["objects"], target) if target else None
+    after_target = get_object_by_type(metadata_after["objects"], target) if target else None
+    inventory_before = get_inventory_types(metadata_before)
+    inventory_after = get_inventory_types(metadata_after)
+
+    if family == "pick":
+        if not inventory_after:
+            return False, "pick_not_holding"
+        return True, None
+    if family == "fillLiquid":
+        if after_target is None or after_target.get("isFilledWithLiquid") is not True:
+            return False, "fill_not_filled"
+        return True, None
+    if family == "turn on":
+        if after_target is None or after_target.get("isToggled") is not True:
+            return False, "toggle_state_not_changed"
+        return True, None
+    if family == "turn off":
+        if after_target is None or after_target.get("isToggled") is not False:
+            return False, "toggle_state_not_changed"
+        return True, None
+    if family == "put":
+        if inventory_after:
+            return False, "put_still_holding"
+        return True, None
+    if family == "open":
+        if after_target is None or after_target.get("isOpen") is not True:
+            return False, "open_state_not_changed"
+        return True, None
+    if family == "close":
+        if after_target is None or after_target.get("isOpen") is not False:
+            return False, "close_state_not_changed"
+        return True, None
+    if family == "clean":
+        if after_target is None or after_target.get("isDirty") is not False:
+            return False, "clean_state_not_changed"
+        return True, None
+    if family == "drop":
+        if inventory_after:
+            return False, "drop_still_holding"
+        return True, None
+    return True, None
+
+
+def refresh_target_if_needed(action, metadata, planner):
+    family = extract_action_family(action)
+    target = extract_action_target(action)
+    if family in {"find", "drop", "throw", "pour"} or not target:
+        return None
+    target_obj = get_object_by_type(metadata["objects"], target)
+    if target_obj is None:
+        return {"status": "unsupported", "reason": "target_not_in_scene"}
+    if family in {"pick", "put", "open", "close", "slice", "turn on", "turn off", "fillLiquid", "clean"}:
+        if target_obj.get("visible") is False or target_obj.get("distance", 99) > 1.5:
+            find_action = f"find {target}"
+            find_result = planner.llm_skill_interact(find_action)
+            return {"status": "refreshed", "action": find_action, "result": find_result}
     return None
 
 
@@ -129,12 +293,25 @@ def guard_action_before_execution(action, metadata):
             }
         target_name = action[4:].strip()
         target_obj = get_object_by_type(objects, target_name)
+        holding_type = inventory[0]["objectId"].split("|")[0] if inventory else None
+        if target_obj is None:
+            return {
+                "status": "block",
+                "reason": "target_not_in_scene",
+                "message": f"Cannot put because target {target_name} is not in the scene.",
+            }
         if target_obj and target_obj.get("openable") and not target_obj.get("isOpen"):
             return {
                 "status": "rewrite",
                 "reason": "receptacle_closed",
                 "replacement": f"open {target_name}",
                 "message": f"Receptacle {target_name} is closed; reopening before put.",
+            }
+        if target_obj and holding_type and holding_type == target_obj["objectType"]:
+            return {
+                "status": "block",
+                "reason": "invalid_object_type",
+                "message": f"Cannot put {holding_type} into incompatible target {target_name}.",
             }
 
     if action.startswith("turn on "):
@@ -183,7 +360,7 @@ def build_execution_entry(action, success, message="", error_message="", raw_vlm
     }
 
 
-def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=None, final_state=None, reference_steps=None):
+def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=None, final_state=None, reference_steps=None, max_sample_seconds=DEFAULT_MAX_SAMPLE_SECONDS):
     controller = None
     try:
         logger.info("Starting AI2-THOR controller for scene=%s", scene)
@@ -192,6 +369,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
         planner.restore_scene()
         vlm_planner = VLMPlanner(action_space=SUPPORTED_ACTIONS)
         step_budget = infer_step_budget(task, reference_steps=reference_steps, explicit_max_steps=max_steps)
+        start_time = time.monotonic()
 
         history = []
         execution_log = []
@@ -201,11 +379,19 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
         fail_type = None
         fail_step = None
         controller_error = None
+        no_progress_counter = 0
+        last_goal_count = compute_goal_satisfied_count(controller.last_event.metadata["objects"], final_state)
+        last_signature = build_progress_signature(controller.last_event.metadata, final_state)
         if pre_satisfied:
             logger.info("Initial scene already satisfies expected final state")
 
         for step_idx in range(step_budget):
             if pre_satisfied:
+                break
+            if time.monotonic() - start_time > max_sample_seconds:
+                fail_type = "sample_timeout"
+                fail_step = step_idx + 1
+                final_status = "infra_failure"
                 break
             logger.info("Planning step %s/%s", step_idx + 1, step_budget)
             frame = controller.last_event.frame
@@ -258,6 +444,63 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 break
 
             logger.info("Predicted action: %s", action)
+            if len(history) >= MAX_REPEATED_ACTIONS and all(prev == action for prev in history[-MAX_REPEATED_ACTIONS:]):
+                fail_type = "repeated_action"
+                fail_step = step_idx + 1
+                execution_log.append(
+                    build_execution_entry(
+                        action=action,
+                        success=False,
+                        message=f"Stopping repeated ineffective action: {action}",
+                        raw_vlm_output=planner_info["raw_output"],
+                        normalized_output=planner_info["normalized_output"],
+                        fail_type=fail_type,
+                        fail_step=fail_step,
+                    )
+                )
+                final_status = "failed"
+                break
+
+            refresh = refresh_target_if_needed(action, controller.last_event.metadata, planner)
+            if refresh:
+                if refresh["status"] == "unsupported":
+                    fail_type = refresh["reason"]
+                    fail_step = step_idx + 1
+                    execution_log.append(
+                        build_execution_entry(
+                            action=action,
+                            success=False,
+                            message=f"Target {extract_action_target(action)} not available in scene.",
+                            raw_vlm_output=planner_info["raw_output"],
+                            normalized_output=planner_info["normalized_output"],
+                            fail_type=fail_type,
+                            fail_step=fail_step,
+                        )
+                    )
+                    final_status = "unsupported"
+                    break
+                if refresh["status"] == "refreshed":
+                    execution_log.append(
+                        build_execution_entry(
+                            action=refresh["action"],
+                            success=refresh["result"]["success"],
+                            message=refresh["result"]["message"],
+                            error_message=refresh["result"]["errorMessage"],
+                            raw_vlm_output=planner_info["raw_output"],
+                            normalized_output=planner_info["normalized_output"],
+                            fail_type=None if refresh["result"]["success"] else "target_refresh_failed",
+                            fail_step=step_idx + 1 if not refresh["result"]["success"] else None,
+                        )
+                    )
+                    if refresh["result"]["success"]:
+                        history.append(refresh["action"])
+                    else:
+                        fail_type = "target_refresh_failed"
+                        fail_step = step_idx + 1
+                        controller_error = refresh["result"]["errorMessage"]
+                        final_status = "failed"
+                        break
+
             guard = guard_action_before_execution(action, controller.last_event.metadata)
             if guard["status"] == "rewrite":
                 logger.info(guard["message"])
@@ -316,23 +559,38 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 final_status = "failed"
                 break
 
+            metadata_before = controller.last_event.metadata
+            held_before = get_inventory_types(metadata_before)
             result = planner.llm_skill_interact(action)
             logger.info("Execution result: %s", result)
+            metadata_after = controller.last_event.metadata
+            held_after = get_inventory_types(metadata_after)
+            logger.info(
+                "Action detail | action=%s | canonical_target=%s | held_before=%s | held_after=%s | goal_satisfied=%s | no_progress=%s",
+                action,
+                extract_action_target(action),
+                held_before,
+                held_after,
+                compute_goal_satisfied_count(metadata_after["objects"], final_state),
+                no_progress_counter,
+            )
 
             history.append(action)
             step_fail_type = None
-            if action.startswith("pick ") and not controller.last_event.metadata.get("inventoryObjects"):
-                step_fail_type = "pick_not_holding"
+            postcheck_ok, postcheck_fail_type = action_postcheck(action, metadata_before, metadata_after)
+            if not postcheck_ok:
+                step_fail_type = postcheck_fail_type
                 result["success"] = False
-                result["message"] = "Pick action reported success but inventory is still empty."
             if action.startswith("put "):
-                if "closed" in (result.get("errorMessage") or "").lower():
+                lowered_error = (result.get("errorMessage") or "").lower()
+                lowered_msg = (result.get("message") or "").lower()
+                if "closed" in lowered_error:
                     step_fail_type = "receptacle_closed"
-                elif "no valid positions" in (result.get("errorMessage") or "").lower():
+                elif "no valid positions" in lowered_error:
                     step_fail_type = "no_valid_positions"
-                elif "not holding" in (result.get("message") or "").lower():
+                elif "not holding" in lowered_msg:
                     step_fail_type = "not_holding_object"
-                elif "invalid" in (result.get("errorMessage") or "").lower():
+                elif "invalid" in lowered_error:
                     step_fail_type = "invalid_object_type"
             execution_log.append(
                 build_execution_entry(
@@ -347,6 +605,15 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 )
             )
 
+            current_goal_count = compute_goal_satisfied_count(metadata_after["objects"], final_state)
+            current_signature = build_progress_signature(metadata_after, final_state)
+            if current_goal_count == last_goal_count and current_signature == last_signature:
+                no_progress_counter += 1
+            else:
+                no_progress_counter = 0
+            last_goal_count = current_goal_count
+            last_signature = current_signature
+
             if evaluate_final_state(controller.last_event.metadata["objects"], final_state) is True:
                 logger.info("Stopping demo because expected final state is already satisfied")
                 final_status = "pre_satisfied" if pre_satisfied else "solved"
@@ -357,6 +624,11 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
                 fail_type = step_fail_type or "controller_failure"
                 fail_step = step_idx + 1
                 controller_error = result["errorMessage"]
+                final_status = "failed"
+                break
+            if no_progress_counter >= MAX_NO_PROGRESS_STEPS:
+                fail_type = "no_progress"
+                fail_step = step_idx + 1
                 final_status = "failed"
                 break
 
@@ -380,6 +652,7 @@ def run_minimal_demo(scene="FloorPlan407", task="Open the Cabinet.", max_steps=N
             "raw_vlm_outputs": raw_vlm_outputs,
             "controller_error": controller_error,
             "step_budget": step_budget,
+            "no_progress_counter": no_progress_counter,
         }
     finally:
         if controller is not None:
